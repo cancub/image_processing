@@ -1,7 +1,10 @@
 import cv2
 import functools
+import numpy as np
 import numpy.typing as _npt
 import os
+from sklearn.cluster import KMeans
+from sklearn.utils import shuffle
 import string
 import typing
 import xml.etree.ElementTree as _ET
@@ -284,25 +287,42 @@ def _index_to_id(index):
     return char
 
 
-def _pixel_to_use_element(img, x_pos, y_pos):
-    # Colour order is a bit wonky in image files loaded by OpenCV.
-    b,g,r = img[y_pos, x_pos, :]
+def _quantize_colours(img, n_colours=64):
+    '''
+    Shamelessly ripped from https://scikit-learn.org/stable/auto_examples/cluster/plot_color_quantization.html
+    '''
+    # Transform image to a 2D array.
+    w, h, d = tuple(img.shape)
+    image_array = np.reshape(img, (w * h, d))
 
-    attrib = {
-        'href': f'#{BASE_ID}{_index_to_id(y_pos)}',
-        'fill': f'rgb({r},{g},{b})',
-    }
+    # Fitting model on a small sub-sample of the data.
+    image_array_sample = shuffle(
+        image_array,
+        random_state=0,
+        n_samples=1000,
+    )
+    kmeans = KMeans(n_clusters=n_colours, random_state=0).fit(
+        image_array_sample
+    )
 
-    if x_pos > 0:
-        attrib['x'] = str(x_pos)
+    # Get labels for all points.
+    labels = kmeans.predict(image_array)
 
-    return _ET.Element('use', attrib)
+    # Get the set of colours that are used in the quantized image, making sure
+    # to work with integers.
+    colours = np.array(kmeans.cluster_centers_, np.uint8)
+
+    # Get the quantized version of the image.
+    quantized_img = colours[labels].reshape(w, h, -1)
+
+    return quantized_img, colours
 
 
 def img_to_rects_svg(
     img: _npt.ArrayLike,
     scale: typing.Union[float, int] = 1,
     blur: typing.Union[float, int] = None,
+    n_colours: int = None,
 ) -> _ET.Element:
     """
     Convert an image (reprsented by a numpy array) to an SVG of <rect>
@@ -316,6 +336,8 @@ def img_to_rects_svg(
         blur (float or int, optinal):
             the standard deviation of the Gaussian blur to apply to the SVG
             after the conversion is complete
+        n_colours (int, optional):
+            the number of colours to use for quantization
 
     Returns:
         the SVG as an ElementTree.Element
@@ -392,9 +414,49 @@ def img_to_rects_svg(
         # apply the blur to them.
         rects_container = _configure_svg_blur(svg, blur)
 
+    if n_colours is not None:
+        # Get the colour-quantized version of the image and the set of unique
+        # colours.
+        img, colours = _quantize_colours(img, n_colours=n_colours)
+
+        # Make sub-groups for each of the colours in the image and store them
+        # in a dict for easy access.
+        colour_groups = {}
+        for c in colours:
+            # Again, weird colour order for OpenCV.
+            b, g, r = c
+
+            colour_groups[tuple(c)] = _ET.SubElement(
+                rects_container,
+                'g',
+                {'fill': f'rgb({r},{g},{b})'},
+            )
+
+        def get_pixel_details(x_pos, y_pos):
+            return colour_groups[tuple(img[y_pos,x_pos,:])], {}
+    else:
+        def get_pixel_details(x_pos, y_pos):
+            b, g, r = img[y_pos,x_pos,:]
+            return rects_container, {'fill': f'rgb({r},{g},{b})'}
+
     # Convert the pixels of the image and their colours to <rect> elements.
     for y in range(height):
         for x in range(width):
-            rects_container.append(_pixel_to_use_element(img, x, y))
+
+            # Build the attributes for the pixel.
+            attrib = {'href': f'#{BASE_ID}{_index_to_id(y)}'}
+            if x > 0:
+                attrib['x'] = str(x)
+
+            group, new_attribs = get_pixel_details(x, y)
+
+            attrib.update(new_attribs)
+
+            # Build the <use> pixel itself and store it in its proper group.
+            _ET.SubElement(
+                group,
+                'use',
+                attrib,
+            )
 
     return svg
