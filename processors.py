@@ -1,11 +1,17 @@
 import cv2
 import numpy.typing as _npt
 import os
+import typing
+import xml.etree.ElementTree as _ET
 
 __all__ = [
     'shrink_image',
     'shrink_image_at_path',
+    'img_to_rects_svg',
 ]
+
+BLUR_ID = 'blur'
+
 
 def _get_crop_dims(actual_dim, desired_dim):
     to_crop = (actual_dim - desired_dim) / 2
@@ -26,6 +32,7 @@ def _get_crop_dims(actual_dim, desired_dim):
         crop_low = int_crop + 1
 
     return crop_low, actual_dim - crop_high
+
 
 def shrink_image(
     img: _npt.ArrayLike,
@@ -128,6 +135,7 @@ def shrink_image(
         :
     ]
 
+
 def shrink_image_at_path(
     path: str,
     height: int = None,
@@ -152,3 +160,143 @@ def shrink_image_at_path(
         raise(f'No file exists at {path}.')
 
     return shrink_image(cv2.imread(path), height, width)
+
+
+def _configure_svg_blur(svg, blur):
+    source_graphic_name = 'SourceGraphic'
+    filter_stage_names = ['blurSquares', 'opaqueBlur']
+
+    # Add a blur filter.
+    blur_filter = _ET.SubElement(
+        _ET.SubElement(svg, 'defs'),
+        'filter',
+        {
+            'id': BLUR_ID,
+            'x': '0',
+            'y': '0',
+            'height': '100%',
+            'width': '100%',
+            'primitiveUnits': 'userSpaceOnUse',
+        },
+    )
+
+    _ET.SubElement(
+        blur_filter,
+        'feGaussianBlur',
+        {
+            'x': '0',
+            'y': '0',
+            'width': '100%',
+            'height': '100%',
+            'stdDeviation': str(blur),
+            'in': source_graphic_name,
+            'result': filter_stage_names[0],
+        },
+    )
+
+    comp_transfer = _ET.SubElement(
+        blur_filter,
+        'feComponentTransfer',
+        {'in': filter_stage_names[0], 'result': filter_stage_names[1]},
+    )
+    _ET.SubElement(
+        comp_transfer,
+        'feFuncA',
+        {'type': 'linear', 'intercept': '1'},
+    )
+
+    _ET.SubElement(
+        blur_filter,
+        'feBlend',
+        {
+            'mode': 'normal',
+            'in': filter_stage_names[1],
+            'in2': source_graphic_name,
+        },
+    )
+
+    # Return the group for the <rect>s, setting it to use the above blur.
+    return _ET.SubElement(svg, 'g', {'filter': f'url(#{BLUR_ID})'})
+
+
+def _pixel_to_rect(img, x_pos, y_pos):
+    # Colour order is a bit wonky in image files loaded by OpenCV.
+    b,g,r = img[y_pos, x_pos, :]
+
+    attrib = {
+        'width': '1',
+        'height': '1',
+        'fill': f'rgb({r},{g},{b})',
+    }
+
+    # We only need to mention the X and Y positions if they are non-zero,
+    # otherwise we can save space by using the 0 default.
+    if x_pos > 0:
+        attrib['x'] = str(x_pos)
+    if y_pos > 0:
+        attrib['y'] = str(y_pos)
+
+    return _ET.Element('rect', attrib)
+
+
+def img_to_rects_svg(
+    img: _npt.ArrayLike,
+    scale: typing.Union[float, int] = 1,
+    blur: typing.Union[float, int] = None,
+) -> _ET.Element:
+    """
+    Convert an image (reprsented by a numpy array) to an SVG of <rect>
+    elements, optionally performing some scaling and blurring of the image.
+
+    Args:
+        img (numpy array):
+            the image to be converted to an SVG
+        scale (float or int, optional):
+            the scaling to be applied to the image prior to conversion
+        blur (float or int, optinal):
+            the standard deviation of the Gaussian blur to apply to the SVG
+            after the conversion is complete
+
+    Returns:
+        the SVG as an ElementTree.Element
+    """
+    if scale != 1:
+        # NOTE:
+        # This is just a straight scaling, so we can avoid all the extra
+        # processing of shrink_image() by skipping to the chase.
+        img = cv2.resize(
+            img,
+            (0, 0),
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_AREA,
+        )
+
+    height, width, _ = img.shape
+
+    # Build the overall <svg> container element.
+    svg = _ET.Element(
+        'svg',
+        {
+            'viewbox': f'0 0 {width} {height}',
+            'width': str(width),
+            'height': str(height),
+            'xmlns':'http://www.w3.org/2000/svg',
+        },
+    )
+
+    if blur is None:
+        # No blur means that the rectangles will be inserted directly under the
+        # <svg> element.
+        rects_container = svg
+    else:
+        # The rectangles will need to be placed into a <g> group element to
+        # apply the blur to them.
+        rects_container = _configure_svg_blur(svg, blur)
+
+    # Convert the pixels of the image and their colours to <rect> elements.
+    for y in range(height):
+        for x in range(width):
+            rects_container.append(_pixel_to_rect(img, x, y))
+
+    return svg
