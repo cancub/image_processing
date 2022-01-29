@@ -1,6 +1,8 @@
 import cv2
+import functools
 import numpy.typing as _npt
 import os
+import string
 import typing
 import xml.etree.ElementTree as _ET
 
@@ -13,8 +15,12 @@ __all__ = [
 BLUR_ID = 'blur'
 
 # This isn't a great ID to use for XML/HTML, since it could accidentally be
-# used somewhere else. We'll just need to remember to reserve "R".
-RECT_TEMPLATE_ID = 'R'
+# used somewhere else. Thankfully, we're increasing the entropy by appending
+# one more character for each template.
+BASE_ID = 'R'
+
+# The possible set of characters to use in identifying specific templates.
+AVAILABLE_ID_CHARS = list(string.hexdigits)
 
 
 def _get_crop_dims(actual_dim, desired_dim):
@@ -231,19 +237,64 @@ def _configure_svg_blur(svg, blur):
     return _ET.SubElement(svg, 'g', {'filter': f'url(#{BLUR_ID})'})
 
 
+@functools.lru_cache
+def _index_to_id(index):
+    """
+    We need to keep the length of the IDs to a minimum. That said, there are
+    only so many characters that we can use. In this case we need to work with
+    looping and wrapping. to get a clean solution.
+
+    NOTE:
+    This function will be called recursively without any changes to underlying
+    data, so we speed it up via lru_cache().
+    """
+    loop_count = 0
+    total_chars = len(AVAILABLE_ID_CHARS)
+
+    while True:
+        try:
+            # Duplicate the character as many time as we have looped.
+            char = AVAILABLE_ID_CHARS[index]
+        except IndexError:
+            # We're (still) past the available set of characters with this
+            # index. So wrap the index and increment the count.
+            index -= total_chars
+            loop_count += 1
+        else:
+            # We've finally found an ID that falls within the avaibale range.
+            break
+
+    if loop_count > 0:
+        # We didn't manage to land within the acceptable range of IDs on the
+        # first attempt. This means we must add another character so as not to
+        # not collide with the ID associated with the non-modulus index. For
+        # example, if
+        #   1 := "a"
+        # and
+        #   300 - total_chars := "a"
+        # then we need to add a character to the 300 ID to make it distinct
+        # from the 1 ID. We can maximize the space saved by recursively
+        # calling this same function, using the number of times we looped as
+        # the argument.
+        # NOTE:
+        # Decrement by one so that we are able to use all N characters, rather
+        # than starting at index=loop_count=1 and skipping the first character.
+        char = _index_to_id(loop_count-1) + char
+
+    return char
+
+
 def _pixel_to_use_element(img, x_pos, y_pos):
     # Colour order is a bit wonky in image files loaded by OpenCV.
     b,g,r = img[y_pos, x_pos, :]
 
     attrib = {
-        'href': '#' + RECT_TEMPLATE_ID,
+        'href': f'#{BASE_ID}{_index_to_id(y_pos)}',
         'fill': f'rgb({r},{g},{b})',
     }
 
     if x_pos > 0:
         attrib['x'] = str(x_pos)
-    if y_pos > 0:
-        attrib['y'] = str(y_pos)
 
     return _ET.Element('use', attrib)
 
@@ -294,18 +345,43 @@ def img_to_rects_svg(
         },
     )
 
+    # The ID for the OG <rect> template that the <use> templates will also
+    # reference.
+    root_id = f'{BASE_ID}{_index_to_id(0)}'
+
     # Regardless of whether or not we're blurring the image, we will need a
-    # definitions block to store the <rect> template. So make that here and
-    # store the template within.
+    # definitions block to store the various templates.
+    defs = _ET.SubElement(svg, 'defs')
+
+    # Add the original template to the definitions.
     _ET.SubElement(
-        _ET.SubElement(svg, 'defs'),
+        defs,
         'rect',
         {
-            'id': RECT_TEMPLATE_ID,
+            'id': root_id,
             'width': '1',
             'height': '1',
         }
     )
+
+    # Get rid of the x attributes in <use> elemements by adding templates for
+    # each of the individual rows.
+    # NOTE:
+    # Work with templates for pixels in rows rather templates for pixels in
+    # columns, because there are more columns than rows, ergo we have more
+    # savings.
+    # Also, we can skip the first row, since it's already handled by the
+    # original <rect>.
+    for y in range(1, height):
+        _ET.SubElement(
+            defs,
+            'use',
+            {
+                'y': str(y),
+                'href': f'#{root_id}',
+                'id': f'{BASE_ID}{_index_to_id(y)}',
+            }
+        )
 
     if blur is None:
         # No blur means that the rectangles will be inserted directly under the
