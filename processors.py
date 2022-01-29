@@ -12,6 +12,10 @@ __all__ = [
 
 BLUR_ID = 'blur'
 
+# This isn't a great ID to use for XML/HTML, since it could accidentally be
+# used somewhere else. We'll just need to remember to reserve "R".
+RECT_TEMPLATE_ID = 'R'
+
 
 def _get_crop_dims(actual_dim, desired_dim):
     to_crop = (actual_dim - desired_dim) / 2
@@ -166,9 +170,17 @@ def _configure_svg_blur(svg, blur):
     source_graphic_name = 'SourceGraphic'
     filter_stage_names = ['blurSquares', 'opaqueBlur']
 
+    # Locate the definitions block which has almost assuredly been added by the
+    # template-generating procedure.
+    defs = svg.find('defs')
+
+    # Just in case though, make the definition block if it doesn't exist.
+    if defs is None:
+        defs = _ET.SubElement(svg, 'defs')
+
     # Add a blur filter.
     blur_filter = _ET.SubElement(
-        _ET.SubElement(svg, 'defs'),
+        defs,
         'filter',
         {
             'id': BLUR_ID,
@@ -219,24 +231,21 @@ def _configure_svg_blur(svg, blur):
     return _ET.SubElement(svg, 'g', {'filter': f'url(#{BLUR_ID})'})
 
 
-def _pixel_to_rect(img, x_pos, y_pos):
+def _pixel_to_use_element(img, x_pos, y_pos):
     # Colour order is a bit wonky in image files loaded by OpenCV.
     b,g,r = img[y_pos, x_pos, :]
 
     attrib = {
-        'width': '1',
-        'height': '1',
+        'href': '#' + RECT_TEMPLATE_ID,
         'fill': f'rgb({r},{g},{b})',
     }
 
-    # We only need to mention the X and Y positions if they are non-zero,
-    # otherwise we can save space by using the 0 default.
     if x_pos > 0:
         attrib['x'] = str(x_pos)
     if y_pos > 0:
         attrib['y'] = str(y_pos)
 
-    return _ET.Element('rect', attrib)
+    return _ET.Element('use', attrib)
 
 
 def img_to_rects_svg(
@@ -285,6 +294,19 @@ def img_to_rects_svg(
         },
     )
 
+    # Regardless of whether or not we're blurring the image, we will need a
+    # definitions block to store the <rect> template. So make that here and
+    # store the template within.
+    _ET.SubElement(
+        _ET.SubElement(svg, 'defs'),
+        'rect',
+        {
+            'id': RECT_TEMPLATE_ID,
+            'width': '1',
+            'height': '1',
+        }
+    )
+
     if blur is None:
         # No blur means that the rectangles will be inserted directly under the
         # <svg> element.
@@ -297,6 +319,6 @@ def img_to_rects_svg(
     # Convert the pixels of the image and their colours to <rect> elements.
     for y in range(height):
         for x in range(width):
-            rects_container.append(_pixel_to_rect(img, x, y))
+            rects_container.append(_pixel_to_use_element(img, x, y))
 
     return svg
