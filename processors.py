@@ -15,6 +15,7 @@ __all__ = [
     'img_to_rects_svg',
 ]
 
+RESIZE_SCALE_INCREMENT = 0.0001
 BLUR_ID = 'blur'
 
 # This isn't a great ID to use for XML/HTML, since it could accidentally be
@@ -173,6 +174,59 @@ def shrink_image_at_path(
         raise(f'No file exists at {path}.')
 
     return shrink_image(cv2.imread(path), height, width)
+
+
+def _scale_image_keep_aspect_ratio(img, scale):
+    """
+    When scaling an image, it's sometimes important to keep the original
+    aspect ratio (especially in the case where we want an image that will be
+    replace by the same image at a bigger scale). This function does a
+    best-effort attempt at scaling, keeping close to the desired scale, while
+    still maintaining the same aspect ratio as the original image.
+    """
+    height, width, _ = img.shape
+
+    # Get the target aspect ratio, limiting the number of decimals to account
+    # for repeating decimals (e.g., 2/3).
+    aspect_ratio = round(width / height, 3)
+
+    def scale_matches(scale_to_test):
+        scaled_height = int(height * scale_to_test)
+        scaled_width = int(width * scale_to_test)
+
+        return round(scaled_width / scaled_height, 3) == aspect_ratio
+
+    # We need to find the nearest scale that actually ends up having the
+    # same aspect ratio as the original. If we're off by even a single
+    # pixel, it could cause some weird effects.
+    scale_delta = 0
+    while True:
+        # First try a smaller scale to see if that works.
+        if scale_matches(scale - scale_delta):
+            scale -= scale_delta
+            break
+
+        # Now try a higher scale.
+        if scale_matches(scale + scale_delta):
+            scale += scale_delta
+            break
+
+        # Neither worked, so we need to increase the delta and try again.
+        scale_delta += RESIZE_SCALE_INCREMENT
+
+    # We've got a scale that works, so find the final dimensions.
+    scaled_height = int(height * scale)
+    scaled_width = int(width * scale)
+
+    # We've found a scale that works, so we can now resize the image.
+    # NOTE:
+    # This is just a straight scaling, so we can avoid all the extra
+    # processing of shrink_image() by skipping to the chase.
+    return cv2.resize(
+        img,
+        (scaled_width, scaled_height),
+        interpolation=cv2.INTER_AREA,
+    )
 
 
 def _configure_svg_blur(svg, blur):
@@ -343,16 +397,7 @@ def img_to_rects_svg(
         the SVG as an ElementTree.Element
     """
     if scale != 1:
-        # NOTE:
-        # This is just a straight scaling, so we can avoid all the extra
-        # processing of shrink_image() by skipping to the chase.
-        img = cv2.resize(
-            img,
-            (0, 0),
-            fx=scale,
-            fy=scale,
-            interpolation=cv2.INTER_AREA,
-        )
+        img = _scale_image_keep_aspect_ratio(img, scale)
 
     height, width, _ = img.shape
 
